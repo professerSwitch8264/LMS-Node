@@ -29,6 +29,7 @@ npm test                  # unit test (ไม่ต้องใช้ฐาน�
 | `CORS_ORIGINS` | ✓ | URL ของหน้าเว็บที่อนุญาต |
 | `SMTP_*`, `MAIL_FROM`, `APP_PUBLIC_URL` | สำหรับอีเมล | ใช้ส่งลิงก์ตั้งรหัสผ่าน / เปิดใช้งานบัญชี |
 | `SSL_KEY_FILE`, `SSL_CERT_FILE` | แนะนำ | ไม่ตั้ง = HTTP (รหัสผ่านไม่ถูกเข้ารหัสระหว่างทาง) |
+| `TRUST_PROXY` | ถ้ามี proxy | อยู่หลัง reverse proxy ที่ทำ HTTPS ให้ (IIS / nginx / Caddy): ใส่ `1` — ไม่งั้นการแบนตาม IP ตอน login จะนับทุกคนเป็น IP เดียว |
 | `LOG_LEVEL` | – | `debug` / `info` / `warn` / `error` |
 
 **ห้าม commit `.env`** (มีรหัสผ่านฐานข้อมูลและ key) — `.gitignore` กันไว้แล้ว

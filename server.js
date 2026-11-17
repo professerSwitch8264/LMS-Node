@@ -16,6 +16,7 @@ const { loginUser, ensureUserTable } = require('./src/controllers/userController
 const { ensureTransactionLogTable } = require('./src/controllers/auditLogController');
 const { loginRateLimit } = require('./src/middleware/loginRateLimit');
 const { createOriginChecker } = require('./src/config/cors');
+const { parseTrustProxy } = require('./src/config/proxy');
 const { authenticateSocket } = require('./src/middleware/auth');
 const { hideInternalErrors, finalErrorHandler, installProcessErrorLogging } = require('./src/middleware/errorHandling');
 const { logger, requestLogger } = require('./src/utils/logger');
@@ -25,6 +26,9 @@ installProcessErrorLogging();
 const checkOrigin = createOriginChecker();
 
 const app = express();
+// อยู่หลัง reverse proxy: อ่าน IP จริงจาก X-Forwarded-For (ดู src/config/proxy.js)
+const trustProxy = parseTrustProxy(process.env.TRUST_PROXY);
+if (trustProxy !== false) app.set('trust proxy', trustProxy);
 // backend ส่งแค่ JSON ไม่มีหน้าเว็บ จึงตั้ง CSP ให้ห้ามโหลดทุกอย่างและห้ามฝังใน iframe
 app.use(helmet({
   contentSecurityPolicy: {
@@ -46,8 +50,10 @@ const useHttps = Boolean(sslKeyFile && sslCertFile);
 const server = useHttps
   ? https.createServer({ key: fs.readFileSync(sslKeyFile), cert: fs.readFileSync(sslCertFile) }, app)
   : http.createServer(app);
-if (!useHttps) {
-  logger.warn('⚠️ Running over plain HTTP — passwords and tokens are not encrypted in transit. Set SSL_KEY_FILE and SSL_CERT_FILE (or put the server behind an HTTPS reverse proxy).');
+if (!useHttps && trustProxy !== false) {
+  logger.info('Behind a reverse proxy (TRUST_PROXY) — HTTPS is handled by the proxy.');
+} else if (!useHttps) {
+  logger.warn('⚠️ Running over plain HTTP — passwords and tokens are not encrypted in transit. Set SSL_KEY_FILE and SSL_CERT_FILE (or put the server behind an HTTPS reverse proxy and set TRUST_PROXY).');
 }
 const io = new Server(server, {
   cors: { origin: checkOrigin },

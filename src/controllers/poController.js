@@ -1,4 +1,5 @@
 const { logger } = require('../utils/logger');
+const { parseTableQuery, queryPoTable } = require('../services/poTableService');
 const { sql, getPool } = require('../config/db');
 const { TABLES } = require('../config/constants');
 const { formatSqlDateTimeStr, formatLocalIso } = require('../utils/dateHelper');
@@ -54,9 +55,8 @@ async function resolveTruckFromDb(pool, truckTypeId, truckType) {
   return { truckTypeId: finalId, truckType: finalName };
 }
 
-async function getPos(req, res) {
-  try {
-    const pool = await getPool();
+// อ่าน PO ทั้งหมดจากฐานข้อมูล แล้วแปลงเป็นรูปแบบที่หน้าเว็บใช้ (ใช้ทั้ง GET /pos และ GET /pos/table)
+async function loadAllPos(pool) {
     const hasCancleCol = await pool.request().query(`
       SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('${TABLES.RECEIVED}') AND name = 'cancle_reason'
     `);
@@ -250,6 +250,31 @@ async function getPos(req, res) {
       };
     });
 
+    return pos;
+}
+
+// GET /api/pos/table — ตาราง PO: ค้นหา / กรอง / เรียง / แบ่งหน้าที่ server (ดู services/poTableService.js)
+async function getPoTable(req, res) {
+  try {
+    const pool = await getPool();
+    const pos = await loadAllPos(pool);
+    const effective = req.user?.effective || {};
+    const viewer = {
+      role: req.user?.roleId,
+      permissions: { ...(effective.perms || {}), isAdminSystem: Boolean(effective.isAdminSystem) },
+    };
+    const result = queryPoTable(pos, parseTableQuery(req.query), viewer);
+    res.json({ success: true, data: result.rows, total: result.total, page: result.page, pageSize: result.pageSize, totalPages: result.totalPages, options: result.options });
+  } catch (err) {
+    logger.error('Error in /api/pos/table:', err.message);
+    res.status(500).json({ success: false, error: err.message });
+  }
+}
+
+async function getPos(req, res) {
+  try {
+    const pool = await getPool();
+    const pos = await loadAllPos(pool);
     res.json({ success: true, data: pos });
   } catch (err) {
     logger.error('Error in /api/pos:', err.message);
@@ -853,10 +878,13 @@ async function upsertOfficePo(newRequest, body) {
 
 function createSaveOfficePoHandler(io) {
   return async function saveOfficePo(req, res) {
-    const { poNo } = req.body;
+    const { poNo, receivedId, id } = req.body;
 
     if (!poNo || !String(poNo).trim()) {
       return res.status(400).json({ success: false, error: 'ไม่พบหมายเลข PO' });
+    }
+    if (!receivedId && !id && !isValidPoNo(poNo)) {
+      return res.status(400).json({ success: false, error: INVALID_PO_MESSAGE });
     }
 
     try {
@@ -917,6 +945,12 @@ const IMPORT_REQUIRED = [
   ['shipTo', (it) => Boolean(String(it.shipToName || it.toLocation || '').trim()), 'สถานที่ส่ง'],
 ];
 
+// หมายเลข PO: ตัวเลขล้วน 10 หลัก (กฎเดียวกับหน้าเว็บ: isValidPoNo ใน src/domain/po.js)
+// ใช้กับ PO ที่สร้างใหม่และการนำเข้า — PO เดิมที่มีอยู่ก่อนกฎนี้ ยังแก้ข้อมูลอื่นได้
+const PO_NO_PATTERN = /^\d{10}$/;
+const isValidPoNo = (value) => PO_NO_PATTERN.test(String(value ?? '').trim());
+const INVALID_PO_MESSAGE = 'หมายเลข PO ต้องเป็นตัวเลข 10 หลัก';
+
 function validateImportItems(items) {
   const errors = [];
   const seen = new Map();
@@ -926,6 +960,7 @@ function validateImportItems(items) {
     const rows = Array.isArray(item.rows) ? item.rows.filter((n) => Number.isInteger(n)) : [];
     const problems = [];
     if (!poNo) problems.push('ไม่ได้กรอกหมายเลข PO');
+    else if (!isValidPoNo(poNo)) problems.push(INVALID_PO_MESSAGE);
     const missing = IMPORT_REQUIRED.filter(([, ok]) => !ok(item)).map(([, , label]) => label);
     if (missing.length) problems.push(`ไม่ได้กรอก ${missing.join(', ')}`);
     if (poNo) {
@@ -1416,6 +1451,8 @@ function createSetUrgentPoHandler(io) {
 
 module.exports = {
   getPos,
+  getPoTable,
+  loadAllPos,
   createRegisterCarHandler,
   createTruckArrivalHandler,
   createTruckDepartureHandler,

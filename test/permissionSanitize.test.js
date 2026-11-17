@@ -7,8 +7,8 @@ const assert = require('node:assert/strict');
 const { PERMISSION_KEYS, sanitizePermissions } = require('../src/controllers/permissionController');
 
 describe('sanitizePermissions', () => {
-  it('always returns every permission key (45)', () => {
-    assert.equal(PERMISSION_KEYS.length, 45);
+  it('always returns every permission key (46)', () => {
+    assert.equal(PERMISSION_KEYS.length, 46);
     const clean = sanitizePermissions({ canAddPo: true });
     assert.deepEqual(Object.keys(clean), [...PERMISSION_KEYS]);
   });

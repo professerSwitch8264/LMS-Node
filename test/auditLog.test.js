@@ -5,7 +5,7 @@ process.env.DB_PASSWORD = process.env.DB_PASSWORD || 'test';
 const { describe, it } = require('node:test');
 const assert = require('node:assert/strict');
 const { PO, DOOR, USER, dateTimeText } = require('../src/services/auditEvents');
-const { getAuditLogs, isYusenLog } = require('../src/controllers/auditLogController');
+const { getAuditLogs, visibleSides } = require('../src/controllers/auditLogController');
 
 const fakeRes = () => {
   const res = { statusCode: 200, body: null };
@@ -64,8 +64,7 @@ describe('GET /audit-logs access', () => {
     assert.equal(res.statusCode, 403);
   });
 
-  it('isYusenLog matches car plan / arrival rows', () => {
-    assert.equal(isYusenLog({ action_type: 'SAVE_CAR_PLAN' }), true);
-    assert.equal(isYusenLog({ action_type: 'ISSUE_TICKET', details: 'บันทึกเวลาออกตั๋วเรียบร้อย' }), false);
+  it('visibility is by the side of the person who saved the entry (see test/userSide.test.js)', () => {
+    assert.deepEqual(visibleSides({ isAdminSystem: false, perms: { canViewAuditLogYusen: true, canViewAuditLogWanthai: false, canViewAuditLogDx: false } }), ['YUSEN']);
   });
 });

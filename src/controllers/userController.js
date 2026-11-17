@@ -96,10 +96,16 @@ function verifyPassword(password, storedHash) {
   }
 }
 
+// ฝ่ายของผู้ใช้: DX (ผู้ดูแลระบบ) / WANTHAI / YUSEN — ไม่ระบุฝ่าย ให้เดาจาก role
+const USER_GROUPS = ['DX', 'WANTHAI', 'YUSEN'];
+const DX_ROLE_SQL_LIST = "('ADMIN_SYSTEM', 'DX')";
+
 function normalizeUserGroup(group, roleId = '') {
-  const g = String(group || '').trim().toUpperCase();
-  if (g === 'WANTHAI' || g === 'YUSEN') return g;
+  let g = String(group || '').trim().toUpperCase();
+  if (g === 'WAREHOUSE') g = 'WANTHAI';
+  if (USER_GROUPS.includes(g)) return g;
   const r = String(roleId || '').trim().toUpperCase();
+  if (r === 'ADMIN_SYSTEM' || r === 'DX') return 'DX';
   if (r.includes('YUSEN') || r === 'CAR_REGISTER' || r === 'TRUCKER' || r === 'TRUCK') {
     return 'YUSEN';
   }
@@ -119,7 +125,7 @@ async function hasUserGroupColumn(pool) {
 }
 
 function getUserGroupSelectSql(hasGroupCol) {
-  const fallbackSql = `CASE WHEN UPPER(u.role_id) LIKE '%YUSEN%' OR UPPER(u.role_id) IN ('CAR_REGISTER', 'TRUCKER', 'TRUCK') THEN 'YUSEN' ELSE 'WANTHAI' END`;
+  const fallbackSql = `CASE WHEN UPPER(u.role_id) IN ${DX_ROLE_SQL_LIST} THEN 'DX' WHEN UPPER(u.role_id) LIKE '%YUSEN%' OR UPPER(u.role_id) IN ('CAR_REGISTER', 'TRUCKER', 'TRUCK') THEN 'YUSEN' ELSE 'WANTHAI' END`;
   return hasGroupCol
     ? `COALESCE(u.user_group, ${fallbackSql}) AS user_group,`
     : `${fallbackSql} AS user_group,`;
@@ -140,11 +146,12 @@ async function ensureUserGroupColumn(pool) {
   await pool.request().query(`
     UPDATE [${T}]
     SET user_group = CASE
+      WHEN UPPER(role_id) IN ${DX_ROLE_SQL_LIST} THEN 'DX'
       WHEN UPPER(role_id) LIKE '%YUSEN%' OR UPPER(role_id) IN ('CAR_REGISTER', 'TRUCKER', 'TRUCK') THEN 'YUSEN'
       ELSE 'WANTHAI'
     END
     WHERE user_group IS NULL
-       OR user_group NOT IN ('WANTHAI', 'YUSEN');
+       OR user_group NOT IN ('DX', 'WANTHAI', 'YUSEN');
   `);
 
   await pool.request().query(`
@@ -161,10 +168,15 @@ async function ensureUserGroupColumn(pool) {
       ALTER TABLE [${T}] ADD CONSTRAINT DF_User_user_group DEFAULT 'WANTHAI' FOR user_group;
     END
 
-    IF NOT EXISTS (SELECT 1 FROM sys.check_constraints WHERE name = 'CK_User_user_group')
+    -- ฝ่าย DX: สร้าง constraint ใหม่ที่รู้จัก DX (ครั้งเดียว) และย้ายผู้ดูแลระบบเดิมที่อยู่ฝ่าย WANTHAI ไปเป็น DX
+    -- รันเฉพาะตอนที่ constraint ยังไม่รู้จัก DX — ภายหลังถ้าแอดมินตั้งฝ่ายเองจะไม่ถูกเขียนทับ
+    IF NOT EXISTS (SELECT 1 FROM sys.check_constraints WHERE name = 'CK_User_user_group' AND definition LIKE '%DX%')
     BEGIN
+      IF EXISTS (SELECT 1 FROM sys.check_constraints WHERE name = 'CK_User_user_group')
+        ALTER TABLE [${T}] DROP CONSTRAINT CK_User_user_group;
+      UPDATE [${T}] SET user_group = 'DX' WHERE UPPER(role_id) IN ${DX_ROLE_SQL_LIST} AND user_group = 'WANTHAI';
       ALTER TABLE [${T}] ADD CONSTRAINT CK_User_user_group
-        CHECK (user_group IN ('WANTHAI', 'YUSEN'));
+        CHECK (user_group IN ('DX', 'WANTHAI', 'YUSEN'));
     END
   `);
 }
@@ -1397,6 +1409,7 @@ async function resetLinkMfaVerify(req, res) {
 }
 
 module.exports = {
+  normalizeUserGroup,
   getUsers,
   getUserByUsername,
   createUser,

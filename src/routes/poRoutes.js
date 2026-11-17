@@ -1,6 +1,7 @@
 const express = require('express');
 const {
   getPos,
+  getPoTable,
   createRegisterCarHandler,
   createTruckArrivalHandler,
   createTruckDepartureHandler,
@@ -23,6 +24,7 @@ function createPoRoutes(io) {
   const audit = (build) => auditRoute(io, build);
 
   router.get('/pos', getPos);
+  router.get('/pos/table', can('canViewPoTable'), getPoTable);
   router.post('/register-car', can('canEditCarPlan'), audit(PO.saveCarPlan), createRegisterCarHandler(io));
   router.post(['/truck-arrival', '/truck-arrive'], can('canActionTruckArrival'), audit(PO.truckArrival), createTruckArrivalHandler(io));
   // รถออก: handler บันทึก audit เอง (TRUCK_DEPARTURE)

@@ -79,7 +79,7 @@ function getEffectivePermissions(roleId, rawPermissions, defaults = {}) {
     normalized.canViewRoles = true;
   }
 
-  if (base.canViewAuditLogWanthai || base.canViewAuditLogYusen) normalized.canViewAuditLog = true;
+  if (base.canViewAuditLogDx || base.canViewAuditLogWanthai || base.canViewAuditLogYusen) normalized.canViewAuditLog = true;
 
   return { isAdminSystem: false, perms: { ...normalized, ...base, ...poDataPerms } };
 }
