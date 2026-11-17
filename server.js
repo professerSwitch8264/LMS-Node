@@ -76,8 +76,9 @@ io.on('connection', async (socket) => {
 });
 
 const PORT = process.env.PORT || 5000;
-server.listen(PORT, async () => {
-  logger.info(`🚀 Server running on port ${PORT}`);
+// เตรียมฐานข้อมูลให้เสร็จก่อนรับ request (รวมการย้ายข้อมูลครั้งแรก Received → PO / PO_Transaction)
+// ไม่งั้น request ที่เข้ามาระหว่างย้ายจะเจอ "Invalid object name 'V_PO_Current'"
+(async () => {
   try {
     await initializeDatabase();
     await ensureTransactionLogTable();
@@ -85,4 +86,7 @@ server.listen(PORT, async () => {
   } catch (err) {
     logger.warn('⚠️ Running in fallback mode. Database will reconnect once available.');
   }
-});
+  server.listen(PORT, () => {
+    logger.info(`🚀 Server running on port ${PORT}`);
+  });
+})();

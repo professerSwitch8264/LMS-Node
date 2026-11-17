@@ -47,7 +47,7 @@ function getPool() {
 async function initializeDatabase() {
   try {
     const pool = await getPool();
-    logger.info('🔄 Checking and initializing database tables (New Schema: Customer, Dock_door, Received, Ship_to, Truck, Warehouse)...');
+    logger.info('🔄 Checking and initializing database tables (New Schema: Customer, Dock_door, PO, PO_Transaction, Ship_to, Truck, Warehouse)...');
 
     await pool.request().query(`
       IF NOT EXISTS (SELECT * FROM sys.tables WHERE name = '${TABLES.CUSTOMER}')
@@ -221,136 +221,10 @@ async function initializeDatabase() {
       END
     `);
 
-    await pool.request().query(`
-      IF NOT EXISTS (SELECT * FROM sys.tables WHERE name = '${TABLES.RECEIVED}')
-      BEGIN
-        IF EXISTS (SELECT * FROM sys.tables WHERE name = 'Received_Master')
-        BEGIN
-          EXEC sp_rename 'Received_Master', '${TABLES.RECEIVED}';
-        END
-        ELSE
-        BEGIN
-          CREATE TABLE ${TABLES.RECEIVED} (
-            received_id INT IDENTITY(1,1) PRIMARY KEY,
-            PO_No NVARCHAR(50) NOT NULL,
-            quantity DECIMAL(18,2) NULL,
-            quantity_uom NVARCHAR(20) NULL,
-            customer_id INT NULL,
-            customer_code NVARCHAR(50) NULL,
-            customer_Name NVARCHAR(255) NULL,
-            create_date DATETIME DEFAULT GETDATE(),
-            order_date DATETIME NULL,
-            loading_date_plan DATETIME NULL,
-            delivery_date_plan DATETIME NULL,
-            ship_date_plan DATETIME NULL,
-            create_by NVARCHAR(100) NULL,
-            truck_type_id INT NULL,
-            truck_type NVARCHAR(100) NULL,
-            license NVARCHAR(50) NULL,
-            driver_name NVARCHAR(100) NULL,
-            update_by NVARCHAR(100) NULL,
-            update_date DATETIME DEFAULT GETDATE(),
-            ship_to_code NVARCHAR(50) NULL,
-            ship_to_name NVARCHAR(255) NULL,
-            warehouse_id INT NULL,
-            warehouse_code NVARCHAR(50) NULL,
-            warehouse_name NVARCHAR(255) NULL,
-            register_date DATETIME NULL,
-            pick_start_date_time DATETIME NULL,
-            pick_finish_date_time DATETIME NULL,
-            load_start_date_time DATETIME NULL,
-            load_finish_date_time DATETIME NULL,
-            truck_departure DATETIME NULL,
-            dock_door_id INT NULL,
-            dock_door_code NVARCHAR(50) NULL,
-            dock_door_name NVARCHAR(100) NULL,
-            cancle_reason NVARCHAR(255) NULL,
-            process_stage NVARCHAR(50) DEFAULT 'ADMIN_OFFICE'
-          );
-        END
-      END
-      ELSE
-      BEGIN
-        -- ตรวจสอบคอลัมน์และ Constraints ให้สมบูรณ์
-        IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('${TABLES.RECEIVED}') AND name = 'received_id')
-        BEGIN
-          ALTER TABLE ${TABLES.RECEIVED} ADD received_id INT IDENTITY(1,1) NOT NULL;
-        END
-
-        IF NOT EXISTS (
-          SELECT 1 FROM sys.key_constraints 
-          WHERE parent_object_id = OBJECT_ID('${TABLES.RECEIVED}') AND type = 'PK'
-        )
-        BEGIN
-          ALTER TABLE ${TABLES.RECEIVED} ADD CONSTRAINT PK_${TABLES.RECEIVED} PRIMARY KEY (received_id);
-        END
-
-        IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('${TABLES.RECEIVED}') AND name = 'process_stage')
-        BEGIN
-          ALTER TABLE ${TABLES.RECEIVED} ADD process_stage NVARCHAR(50) DEFAULT 'ADMIN_OFFICE';
-        END
-
-        IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('${TABLES.RECEIVED}') AND name = 'warehouse_id')
-        BEGIN
-          ALTER TABLE ${TABLES.RECEIVED} ADD warehouse_id INT NULL;
-        END
-
-        IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('${TABLES.RECEIVED}') AND name = 'warehouse_code')
-        BEGIN
-          ALTER TABLE ${TABLES.RECEIVED} ADD warehouse_code NVARCHAR(50) NULL;
-        END
-
-        IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('${TABLES.RECEIVED}') AND name = 'warehouse_name')
-        BEGIN
-          ALTER TABLE ${TABLES.RECEIVED} ADD warehouse_name NVARCHAR(255) NULL;
-        END
-
-        IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('${TABLES.RECEIVED}') AND name = 'reschedule_date')
-        BEGIN
-          ALTER TABLE ${TABLES.RECEIVED} ADD reschedule_date DATETIME NULL;
-        END
-
-        IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('${TABLES.RECEIVED}') AND name = 'reschedule_reason')
-        BEGIN
-          ALTER TABLE ${TABLES.RECEIVED} ADD reschedule_reason NVARCHAR(255) NULL;
-        END
-
-        IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('${TABLES.RECEIVED}') AND name = 'cancle_reason')
-        BEGIN
-          ALTER TABLE ${TABLES.RECEIVED} ADD cancle_reason NVARCHAR(255) NULL;
-        END
-
-        IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('${TABLES.RECEIVED}') AND name = 'ship_date_plan')
-        BEGIN
-          ALTER TABLE ${TABLES.RECEIVED} ADD ship_date_plan DATETIME NULL;
-        END
-
-        IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('${TABLES.RECEIVED}') AND name = 'loading_date_plan')
-        BEGIN
-          ALTER TABLE ${TABLES.RECEIVED} ADD loading_date_plan DATETIME NULL;
-        END
-
-        IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('${TABLES.RECEIVED}') AND name = 'delivery_date_plan')
-        BEGIN
-          ALTER TABLE ${TABLES.RECEIVED} ADD delivery_date_plan DATETIME NULL;
-        END
-
-        IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('${TABLES.RECEIVED}') AND name = 'ticket_date')
-        BEGIN
-          ALTER TABLE ${TABLES.RECEIVED} ADD ticket_date DATETIME NULL;
-        END
-
-        IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('${TABLES.RECEIVED}') AND name = 'truck_arrival')
-        BEGIN
-          ALTER TABLE ${TABLES.RECEIVED} ADD truck_arrival DATETIME NULL;
-        END
-
-        IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('${TABLES.RECEIVED}') AND name = 'driver_tel')
-        BEGIN
-          ALTER TABLE ${TABLES.RECEIVED} ADD driver_tel NVARCHAR(20) NULL;
-        END
-      END
-    `);
+    // PO + PO_Transaction (ย้ายข้อมูลจาก Received เดิมอัตโนมัติครั้งแรก)
+    await require('./poSchema').ensurePoTables(pool);
+    // หน่วยนับ / เหตุผลยกเลิก / เหตุผลเลื่อนแผน (ตารางรายการตัวเลือก)
+    await require('./lookupSchema').ensureLookupTables(pool);
 
     const truckCheck = await pool.request().query(`SELECT COUNT(*) as count FROM ${TABLES.TRUCK}`);
     if (truckCheck.recordset[0].count === 0) {

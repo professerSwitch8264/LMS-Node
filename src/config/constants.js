@@ -1,7 +1,14 @@
 const TABLES = {
   CUSTOMER: 'Customer',
   DOCK_DOOR: 'Dock_door',
-  RECEIVED: 'Received',
+  RECEIVED: 'Received', // ตารางเดิม — ย้ายไป PO / PO_Transaction แล้ว (config/poSchema.js) ใช้เฉพาะตอน migrate
+  PO: 'PO',
+  PO_TRANSACTION: 'PO_Transaction',
+  PO_CURRENT_VIEW: 'V_PO_Current', // PO + รอบปัจจุบัน ชื่อคอลัมน์เดียวกับ Received เดิม (ใช้อ่านเท่านั้น)
+  UOM: 'Uom', // หน่วยนับ (uom_code + uom_name)
+  CANCEL_REASON: 'Cancel_reason', // เหตุผลยกเลิก PO (reason_name)
+  RESCHEDULE_REASON: 'Reschedule_reason', // เหตุผลเลื่อนแผนรถเข้า (reason_name)
+  PO_ROUND_VIEW: 'V_PO_Round', // PO + ทุกรอบ (ประวัติเลื่อนแผน / Excel)
   SHIP_TO: 'Ship_to',
   TRUCK: 'Truck',
   WAREHOUSE: 'Warehouse',

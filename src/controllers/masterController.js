@@ -2,6 +2,7 @@ const { logger } = require('../utils/logger');
 const { sql, getPool } = require('../config/db');
 const { TABLES } = require('../config/constants');
 const { broadcastDashboardUpdate } = require('../services/dashboardService');
+const lookups = require('../config/lookupSchema');
 
 async function syncDockDoorStatuses() {
   try {
@@ -44,13 +45,13 @@ async function syncDockDoorStatuses() {
       FROM ${TABLES.DOCK_DOOR} d
       WHERE (d.dock_door_id IN (
               SELECT DISTINCT dock_door_id
-              FROM ${TABLES.RECEIVED}
-              WHERE dock_door_id IS NOT NULL AND process_stage NOT IN ('COMPLETED', 'DEPARTED', 'CANCLE', 'CANCEL')
+              FROM ${TABLES.PO_CURRENT_VIEW}
+              WHERE dock_door_id IS NOT NULL AND process_stage NOT IN ('COMPLETED', 'DEPARTED', 'CANCELLED', 'CANCEL')
             )
          OR d.dock_door_code IN (
               SELECT DISTINCT dock_door_code
-              FROM ${TABLES.RECEIVED}
-              WHERE dock_door_code IS NOT NULL AND dock_door_code <> '' AND process_stage NOT IN ('COMPLETED', 'DEPARTED', 'CANCLE', 'CANCEL')
+              FROM ${TABLES.PO_CURRENT_VIEW}
+              WHERE dock_door_code IS NOT NULL AND dock_door_code <> '' AND process_stage NOT IN ('COMPLETED', 'DEPARTED', 'CANCELLED', 'CANCEL')
             ))
         AND d.is_active <> 1
     `);
@@ -128,14 +129,14 @@ async function getDockDoors(req, res) {
         d.is_active,
         ISNULL(d.is_deleted, 0) as is_deleted,
         (SELECT TOP 1 r.PO_No
-         FROM ${TABLES.RECEIVED} r
+         FROM ${TABLES.PO_CURRENT_VIEW} r
          WHERE (r.dock_door_id = d.dock_door_id OR r.dock_door_code = d.dock_door_code)
-           AND r.process_stage NOT IN ('COMPLETED', 'CANCLE', 'CANCEL', 'DEPARTED')
+           AND r.process_stage NOT IN ('COMPLETED', 'CANCELLED', 'CANCEL', 'DEPARTED')
          ORDER BY r.update_date DESC) as current_po_no,
         (SELECT TOP 1 r.customer_Name
-         FROM ${TABLES.RECEIVED} r
+         FROM ${TABLES.PO_CURRENT_VIEW} r
          WHERE (r.dock_door_id = d.dock_door_id OR r.dock_door_code = d.dock_door_code)
-           AND r.process_stage NOT IN ('COMPLETED', 'CANCLE', 'CANCEL', 'DEPARTED')
+           AND r.process_stage NOT IN ('COMPLETED', 'CANCELLED', 'CANCEL', 'DEPARTED')
          ORDER BY r.update_date DESC) as current_customer
       FROM ${TABLES.DOCK_DOOR} d
       ${whereClause}
@@ -193,9 +194,9 @@ function createToggleDockDoorLockHandler(io) {
         .input('doorCode', sql.NVarChar(50), dockDoorCode || '')
         .query(`
           SELECT TOP 1 PO_No, customer_Name
-          FROM ${TABLES.RECEIVED}
+          FROM ${TABLES.PO_CURRENT_VIEW}
           WHERE ((dock_door_id = @doorId AND @doorId IS NOT NULL) OR (dock_door_code = @doorCode AND @doorCode <> ''))
-            AND ISNULL(process_stage, '') NOT IN ('COMPLETED', 'CANCLE')
+            AND ISNULL(process_stage, '') NOT IN ('COMPLETED', 'CANCELLED')
         `);
 
       if (checkOccupied.recordset.length > 0) {
@@ -292,15 +293,15 @@ function createBatchLockDockDoorsHandler(io) {
           SET is_active = @status
           WHERE dock_door_id NOT IN (
             SELECT DISTINCT dock_door_id
-            FROM ${TABLES.RECEIVED}
+            FROM ${TABLES.PO_CURRENT_VIEW}
             WHERE dock_door_id IS NOT NULL
-              AND ISNULL(process_stage, '') NOT IN ('COMPLETED', 'CANCLE')
+              AND ISNULL(process_stage, '') NOT IN ('COMPLETED', 'CANCELLED')
           )
           AND dock_door_code NOT IN (
             SELECT DISTINCT dock_door_code
-            FROM ${TABLES.RECEIVED}
+            FROM ${TABLES.PO_CURRENT_VIEW}
             WHERE dock_door_code IS NOT NULL AND dock_door_code <> ''
-              AND ISNULL(process_stage, '') NOT IN ('COMPLETED', 'CANCLE')
+              AND ISNULL(process_stage, '') NOT IN ('COMPLETED', 'CANCELLED')
           );
         `);
 
@@ -476,9 +477,9 @@ function createDeleteDockDoorHandler(io) {
         .input('doorCode', sql.NVarChar(50), targetDoor.dock_door_code)
         .query(`
           SELECT TOP 1 PO_No, customer_Name
-          FROM ${TABLES.RECEIVED}
+          FROM ${TABLES.PO_CURRENT_VIEW}
           WHERE ((dock_door_id = @doorId AND @doorId IS NOT NULL) OR (dock_door_code = @doorCode AND @doorCode <> ''))
-            AND ISNULL(process_stage, '') NOT IN ('COMPLETED', 'CANCLE', 'CANCEL', 'DEPARTED')
+            AND ISNULL(process_stage, '') NOT IN ('COMPLETED', 'CANCELLED', 'CANCEL', 'DEPARTED')
         `);
 
       if (checkOccupied.recordset.length > 0) {
@@ -621,7 +622,24 @@ async function getTruckTypes(req, res) {
   }
 }
 
+// GET /api/lookups — หน่วยนับ + เหตุผลยกเลิก + เหตุผลเลื่อนแผน (ทุกคนที่ login ใช้ได้)
+async function getLookups(req, res) {
+  try {
+    const pool = await getPool();
+    const [uoms, cancelReasons, rescheduleReasons] = await Promise.all([
+      lookups.loadUoms(pool),
+      lookups.loadReasons(pool, TABLES.CANCEL_REASON),
+      lookups.loadReasons(pool, TABLES.RESCHEDULE_REASON),
+    ]);
+    res.json({ success: true, data: { uoms, cancelReasons, rescheduleReasons } });
+  } catch (err) {
+    logger.error('Error in /api/lookups:', err.message);
+    res.status(500).json({ success: false, error: err.message });
+  }
+}
+
 module.exports = {
+  getLookups,
   getCustomers,
   getShipTo,
   getDockDoors,

@@ -181,38 +181,6 @@ const isPoInShift = (item, shiftDate) => {
   if (!range) return false;
   const { startMs, endMs } = range;
 
-  if (item.rescheduleDate) {
-    let rD = item.rescheduleDate;
-    let y, m, d;
-    if (rD instanceof Date) {
-      y = rD.getFullYear();
-      m = rD.getMonth();
-      d = rD.getDate();
-    } else if (typeof rD === 'string') {
-      const cleanStr = rD.split('T')[0].split(' ')[0].trim();
-      if (cleanStr.includes('-')) {
-        const parts = cleanStr.split('-');
-        if (parts.length >= 3) {
-          y = parseInt(parts[0], 10);
-          m = parseInt(parts[1], 10) - 1;
-          d = parseInt(parts[2], 10);
-        }
-      } else if (cleanStr.includes('/')) {
-        const parts = cleanStr.split('/');
-        if (parts.length >= 3) {
-          d = parseInt(parts[0], 10);
-          m = parseInt(parts[1], 10) - 1;
-          y = parseInt(parts[2], 10);
-          if (y > 2400) y -= 543;
-        }
-      }
-    }
-    if (y !== undefined && !isNaN(y) && !isNaN(m) && !isNaN(d)) {
-      const reschedTimestamp = new Date(y, m, d, 7, 0, 0).getTime();
-      return !isNaN(reschedTimestamp) && reschedTimestamp >= startMs && reschedTimestamp < endMs;
-    }
-    return false;
-  }
 
   const isCancelled = Boolean(
     item.processStage === 'CANCLE' || 
@@ -470,7 +438,7 @@ const isWaitingForDeliveryDate = (item, baseDate = getCurrentShiftDate()) => {
   );
   if (!hasCarPlan) return false;
 
-  const targetDateVal = item.rescheduleDate || item.reschedule_date || item.registerDate || item.register_date || item.planDate || item.plan_date || item.shipDatePlan || item.ship_date_plan;
+  const targetDateVal = item.registerDate || item.register_date || item.planDate || item.plan_date || item.shipDatePlan || item.ship_date_plan;
   if (!targetDateVal) return false;
 
   let y, m, d;
@@ -612,7 +580,7 @@ const checkIsCarRegistered = (item, isLocalSaved = false) => {
 
   if (
     item.processStage &&
-    ['ISSUE_TICKET', 'ASSIGN_DOCK', 'ADMIN_OUTSIDE', 'WAITING_DEPARTURE', 'COMPLETED'].includes(item.processStage)
+    ['WAIT_TICKET', 'WAIT_DOCK', 'WAIT_LOADING', 'WAIT_DEPARTURE', 'COMPLETED'].includes(item.processStage)
   ) {
     return true;
   }

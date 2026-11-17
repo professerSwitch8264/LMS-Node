@@ -29,10 +29,10 @@ async function getLiveDashboardData() {
         SUM(CASE WHEN license IS NULL OR license = '' THEN 1 ELSE 0 END) as noTruckCount,
         SUM(CASE WHEN license IS NOT NULL AND license <> '' THEN 1 ELSE 0 END) as registeredTruckCount,
         SUM(CASE WHEN truck_arrival IS NOT NULL AND truck_departure IS NULL THEN 1 ELSE 0 END) as onSiteTruckCount,
-        SUM(CASE WHEN process_stage IN ('CANCEL', 'CANCLE') THEN 1 ELSE 0 END) as cancelCount,
-        SUM(CASE WHEN reschedule_date IS NOT NULL THEN 1 ELSE 0 END) as rescheduleCount,
+        SUM(CASE WHEN process_stage IN ('CANCEL', 'CANCELLED') THEN 1 ELSE 0 END) as cancelCount,
+        SUM(CASE WHEN round_no > 1 THEN 1 ELSE 0 END) as rescheduleCount,
         SUM(CASE WHEN truck_arrival IS NOT NULL AND register_date IS NOT NULL AND truck_arrival > register_date THEN 1 ELSE 0 END) as notOnTimeCount
-      FROM ${TABLES.RECEIVED}
+      FROM ${TABLES.PO_CURRENT_VIEW}
     `);
     const kRow = kpiResult.recordset[0] || {};
     const totalPos = kRow.totalPos || 0;
@@ -54,12 +54,12 @@ async function getLiveDashboardData() {
         COALESCE(NULLIF(license, ''), '-') as truck,
         CASE 
           WHEN truck_departure IS NOT NULL OR process_stage = 'COMPLETED' THEN 'Completed'
-          WHEN load_finish_date_time IS NOT NULL OR process_stage = 'WAITING_DEPARTURE' THEN 'Waiting Departure'
+          WHEN load_finish_date_time IS NOT NULL OR process_stage = 'WAIT_DEPARTURE' THEN 'Waiting Departure'
           WHEN load_start_date_time IS NOT NULL THEN 'Loading'
           WHEN pick_start_date_time IS NOT NULL THEN 'Pick Order'
           ELSE 'Not started'
         END as status
-      FROM ${TABLES.RECEIVED}
+      FROM ${TABLES.PO_CURRENT_VIEW}
       ORDER BY create_date DESC
     `);
     const tasks = tasksResult.recordset;
@@ -70,7 +70,7 @@ async function getLiveDashboardData() {
         COUNT(r.PO_No) as orderCount,
         ISNULL(SUM(DATEDIFF(minute, r.load_start_date_time, ISNULL(r.load_finish_date_time, GETDATE()))), 0) / 60.0 as hoursSpent
       FROM ${TABLES.DOCK_DOOR} d
-      LEFT JOIN ${TABLES.RECEIVED} r ON (d.dock_door_id = r.dock_door_id OR d.dock_door_code = r.dock_door_code)
+      LEFT JOIN ${TABLES.PO_CURRENT_VIEW} r ON (d.dock_door_id = r.dock_door_id OR d.dock_door_code = r.dock_door_code)
       WHERE ISNULL(d.is_deleted, 0) = 0
       GROUP BY d.dock_door_code, d.dock_door_id
       ORDER BY d.dock_door_id ASC
@@ -86,7 +86,7 @@ async function getLiveDashboardData() {
         CONVERT(varchar(10), COALESCE(register_date, order_date, create_date), 103) as planDate,
         SUM(quantity) as totalBox,
         SUM(CASE WHEN process_stage = 'COMPLETED' OR load_finish_date_time IS NOT NULL THEN quantity ELSE 0 END) as completeBox
-      FROM ${TABLES.RECEIVED}
+      FROM ${TABLES.PO_CURRENT_VIEW}
       WHERE COALESCE(register_date, order_date, create_date) IS NOT NULL
       GROUP BY CONVERT(varchar(10), COALESCE(register_date, order_date, create_date), 103)
       -- planDate is a dd/mm/yyyy string; order by the real date so the result is chronological

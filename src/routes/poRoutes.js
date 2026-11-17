@@ -2,6 +2,7 @@ const express = require('express');
 const {
   getPos,
   getPoTable,
+  getPoRounds,
   createRegisterCarHandler,
   createTruckArrivalHandler,
   createTruckDepartureHandler,
@@ -25,6 +26,8 @@ function createPoRoutes(io) {
 
   router.get('/pos', getPos);
   router.get('/pos/table', can('canViewPoTable'), getPoTable);
+  // ทุกรอบของ PO (รวมรอบที่ถูกเลื่อนแผน) — ประวัติในหน้ารายละเอียด และ Excel
+  router.post('/pos/rounds', getPoRounds);
   router.post('/register-car', can('canEditCarPlan'), audit(PO.saveCarPlan), createRegisterCarHandler(io));
   router.post(['/truck-arrival', '/truck-arrive'], can('canActionTruckArrival'), audit(PO.truckArrival), createTruckArrivalHandler(io));
   // รถออก: handler บันทึก audit เอง (TRUCK_DEPARTURE)

@@ -67,27 +67,41 @@ const PO = {
     }));
   },
 
+  // handler เก็บข้อมูลรอบเดิมไว้ที่ res.locals.rescheduledPrevious เพื่อบันทึกว่าเลื่อนจากแผนไหน (ข้อมูลรถเดิมดูได้จากประวัติรอบ)
   reschedule: (req, body) => {
     const b = req.body || {};
-    return succeededPoNos(req, body).map((poNo) => ({
-      actionType: 'RESCHEDULE_PO',
-      actionTitle: 'เลื่อนเวลารถเข้า',
-      poNo,
-      details: `เลื่อนเวลารถเข้าเป็น ${dateTimeText(b.rescheduleDate, b.rescheduleTime)} เหตุผล: ${str(b.rescheduleReason) || '-'}`,
-    }));
+    const previous = new Map(
+      (req.res?.locals?.rescheduledPrevious || []).map((x) => [upper(x.poNo), x.previous || {}]),
+    );
+    return succeededPoNos(req, body).map((poNo) => {
+      const old = previous.get(upper(poNo)) || {};
+      const oldPlan = old.register_str ? dateTimeText(old.register_str) : '-';
+      return {
+        actionType: 'RESCHEDULE_PO',
+        actionTitle: 'เลื่อนเวลารถเข้า',
+        poNo,
+        details: `เลื่อนแผนรถเข้าจาก ${oldPlan} เป็น ${dateTimeText(b.rescheduleDate, b.rescheduleTime)} เหตุผล: ${str(b.rescheduleReason) || '-'}`,
+      };
+    });
   },
 
+  // handler เก็บค่าที่บันทึกจริงไว้ที่ res.locals.savedPo (ชื่อลูกค้า/คลังที่หาจาก master แล้ว เผื่อหน้าเว็บส่งมาแค่ id)
   officeSave: (req) => {
     const b = req.body || {};
-    const isNew = !b.receivedId;
+    const saved = req.res?.locals?.savedPo || {};
+    const isNew = saved.created !== undefined ? Boolean(saved.created) : !b.receivedId;
     const rawQty = str(b.quantityOrder);
     const qty = rawQty && !Number.isNaN(Number(rawQty)) ? Number(rawQty).toLocaleString('th-TH') : rawQty;
     const qtyText = qty ? `${qty}${str(b.quantityUom) ? ` ${str(b.quantityUom)}` : ''}` : '-';
+    const custCode = str(saved.customerCode || b.customerCode);
+    const custName = str(saved.customerName || b.customerName);
+    const customerText = custName ? (custCode && custCode !== custName ? `${custName} (${custCode})` : custName) : (custCode || '-');
+    const warehouseText = str(saved.warehouseName || b.warehouseName || saved.warehouseCode || b.warehouseCode) || '-';
     return {
       actionType: isNew ? 'CREATE_PO' : 'UPDATE_PO',
       actionTitle: isNew ? 'เพิ่มข้อมูล PO' : 'แก้ไขข้อมูล PO',
       poNo: b.poNo,
-      details: `${isNew ? 'สร้าง' : 'แก้ไข'} PO ${str(b.poNo)} สถานที่จัดส่ง ${str(b.shipToName || b.toLocation) || '-'} จำนวน ${qtyText}`,
+      details: `${isNew ? 'สร้าง' : 'แก้ไข'} PO ${str(b.poNo)} ลูกค้า ${customerText} สถานที่จัดส่ง ${str(b.shipToName || b.toLocation) || '-'} คลังสินค้า ${warehouseText} จำนวน ${qtyText}`,
     };
   },
 
@@ -231,6 +245,12 @@ const USER = {
     actionType: 'RESET_PASSWORD_REQUEST',
     actionTitle: 'ส่งลิงก์ตั้งรหัสผ่านใหม่',
     details: `ส่งลิงก์ตั้งรหัสผ่านใหม่ให้ผู้ใช้งาน ${targetUser(req)}${body?.data?.email ? ` (${body.data.email})` : ''}`,
+  }),
+  // ผู้ใช้เปลี่ยนรหัสผ่านเอง (บันทึกเฉพาะตอนสำเร็จ ไม่มีรหัสผ่านใน details)
+  changeOwnPassword: (req, body) => ({
+    actionType: 'CHANGE_PASSWORD',
+    actionTitle: 'เปลี่ยนรหัสผ่าน',
+    details: `ผู้ใช้งาน ${upper(req.user?.username) || '-'} เปลี่ยนรหัสผ่านด้วยตัวเอง${body?.emailSent ? ' (ส่งอีเมลแจ้งเจ้าของบัญชีแล้ว)' : ''}`,
   }),
   remove: (req) => ({
     actionType: 'DELETE_USER',

@@ -38,7 +38,17 @@ describe('audit events (built from the request, not from the browser)', () => {
     assert.equal(PO.officeSave({ body: { poNo: 'PO9', quantityOrder: 1500, quantityUom: 'KG' } }).actionType, 'CREATE_PO');
     const update = PO.officeSave({ body: { receivedId: 5, poNo: 'PO9', quantityOrder: 1500, quantityUom: 'KG', shipToName: 'คลัง A' } });
     assert.equal(update.actionType, 'UPDATE_PO');
-    assert.equal(update.details, 'แก้ไข PO PO9 สถานที่จัดส่ง คลัง A จำนวน 1,500 KG');
+    assert.equal(update.details, 'แก้ไข PO PO9 ลูกค้า - สถานที่จัดส่ง คลัง A คลังสินค้า - จำนวน 1,500 KG');
+  });
+
+  it('สร้าง PO: บอกลูกค้าและคลังที่บันทึกจริง (handler หาชื่อจาก master ให้แล้ว)', () => {
+    const req = {
+      body: { poNo: '4500000001', customerId: 3, warehouseId: 2, shipToName: 'DC บางนา', quantityOrder: 10, quantityUom: 'CTN' },
+      res: { locals: { savedPo: { created: true, customerCode: 'C001', customerName: 'บจก. ทดสอบ', warehouseCode: 'WH-01', warehouseName: 'คลัง 1' } } },
+    };
+    const entry = PO.officeSave(req);
+    assert.equal(entry.actionType, 'CREATE_PO');
+    assert.equal(entry.details, 'สร้าง PO 4500000001 ลูกค้า บจก. ทดสอบ (C001) สถานที่จัดส่ง DC บางนา คลังสินค้า คลัง 1 จำนวน 10 CTN');
   });
 
   it('never puts the password into user audit details', () => {

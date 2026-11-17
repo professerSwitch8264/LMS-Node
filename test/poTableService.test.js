@@ -12,7 +12,7 @@ const pos = [
   { poNo: 'PO003', customerName: 'ลูกค้า B', warehouseName: 'WH1', shipToName: 'คลังบางนา', ...plan, dockDoorCode: 'D2' },
   { poNo: 'PO001', customerName: 'ลูกค้า A', warehouseName: 'WH2', shipToName: 'คลังรังสิต', ...plan, truckArrival: '2020-01-15 08:10:00' },
   { poNo: 'PO002', customerName: 'ลูกค้า A', warehouseName: 'WH1', shipToName: 'คลังบางนา', ...plan, truckDeparture: '2020-01-15 10:00:00', processStage: 'COMPLETED' },
-  { poNo: 'PO004', customerName: 'ลูกค้า C', warehouseName: 'WH1', shipToName: 'คลังบางนา', ...plan, processStage: 'CANCLE' },
+  { poNo: 'PO004', customerName: 'ลูกค้า C', warehouseName: 'WH1', shipToName: 'คลังบางนา', ...plan, processStage: 'CANCELLED' },
   { poNo: 'PO005', customerName: 'ลูกค้า C', warehouseName: 'WH3', shipToName: 'คลังลำลูกกา', ...plan, registerDate: '2020-01-20' },
 ];
 const admin = { role: 'ADMIN_SYSTEM', permissions: { isAdminSystem: true } };

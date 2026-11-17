@@ -374,6 +374,28 @@ async function getUsers(req, res) {
   }
 }
 
+// GET /api/users/directory — รายชื่อสำหรับแสดง "อัปเดตโดย" (ทุกคนที่ login ใช้ได้)
+// ส่งเฉพาะรหัสพนักงาน ชื่อ และชื่อตำแหน่ง — ไม่ส่งอีเมล / สถานะบัญชี / ข้อมูลอื่น
+async function getUserDirectory(req, res) {
+  try {
+    const pool = await getPool();
+    const result = await pool.request().query(`
+      SELECT u.username, u.name_th, u.name_en, COALESCE(r.role_name, u.role_id) AS role_name
+      FROM [${TABLES.USER}] u
+      LEFT JOIN ${TABLES.ROLE_PERMISSION} r ON u.role_id = r.role_id
+    `);
+    const data = (result.recordset || []).map((row) => ({
+      username: row.username,
+      name: row.name_th || row.name_en || '',
+      roleName: row.role_name || '',
+    }));
+    return res.json({ success: true, data });
+  } catch (err) {
+    logger.error('Database error fetching user directory:', err.message);
+    return res.status(500).json({ success: false, message: 'ดึงรายชื่อผู้ใช้งานไม่สำเร็จ' });
+  }
+}
+
 async function getUserByUsername(req, res) {
   const cleanUsername = String(req.params.username || '').trim().toUpperCase();
   if (!cleanUsername) {
@@ -1408,9 +1430,181 @@ async function resetLinkMfaVerify(req, res) {
   }
 }
 
+// ---------- ผู้ใช้เปลี่ยนรหัสผ่านเอง (หน้าโปรไฟล์) ----------
+// อีเมลแจ้งว่ารหัสผ่านถูกเปลี่ยน — ไม่มีลิงก์และไม่มีรหัสผ่าน
+function buildPasswordChangedEmail({ username, displayName, changedAt = new Date() }) {
+  const when = changedAt.toLocaleString('th-TH', {
+    timeZone: 'Asia/Bangkok', day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit',
+  });
+  const hasLogo = fs.existsSync(EMAIL_LOGO_PATH);
+  const name = escapeHtml(displayName || username);
+  const title = 'รหัสผ่านถูกเปลี่ยน';
+  const subject = `Logistic Management System - ${title}`;
+  const notice = 'หากคุณไม่ได้เปลี่ยนรหัสผ่านเอง กรุณาแจ้งผู้ดูแลระบบฝ่าย DX ทันที';
+  const text = [
+    `เรียน ${displayName || username}`,
+    '',
+    `รหัสผ่านของผู้ใช้งาน ${username} ถูกเปลี่ยนเมื่อ ${when} น.`,
+    'เครื่องอื่นที่เข้าสู่ระบบค้างไว้ถูกออกจากระบบแล้ว',
+    '',
+    notice,
+  ].join('\n');
+  const FONT = 'CordiaUPC,Arial,sans-serif';
+  const base = `font-family:${FONT};mso-line-height-rule:exactly;`;
+  const html = `<!DOCTYPE html>
+<html lang="th">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>${subject}</title>
+</head>
+<body style="margin:0;padding:0;background-color:#f1f5f9;">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="#f1f5f9" style="background-color:#f1f5f9;">
+  <tr>
+    <td align="center" style="padding:24px 12px;">
+      <table role="presentation" width="520" cellpadding="0" cellspacing="0" border="0" bgcolor="#ffffff"
+        style="width:520px;max-width:520px;background-color:#ffffff;border:1px solid #e2e8f0;border-collapse:separate;">
+        ${hasLogo ? `<tr>
+          <td align="center" bgcolor="#ffffff" style="background-color:#ffffff;padding:20px 28px 12px 28px;">
+            <img src="cid:${EMAIL_LOGO_CID}" width="140" height="93" alt="LMS - Logistic Management System"
+              style="display:block;width:140px;height:93px;border:0;outline:none;text-decoration:none;">
+          </td>
+        </tr>` : ''}
+        <tr>
+          <td bgcolor="#084F6A" style="${base}background-color:#084F6A;padding:16px 28px;color:#ffffff;font-size:20px;line-height:24px;font-weight:bold;">
+            Logistic Management System - ${title}
+          </td>
+        </tr>
+        <tr>
+          <td style="${base}padding:24px 28px 24px 28px;color:#1e293b;font-size:18px;line-height:22px;">
+            <p style="${base}margin:0 0 12px 0;font-size:18px;line-height:22px;">เรียน ${name}</p>
+            <p style="${base}margin:0 0 12px 0;font-size:18px;line-height:22px;">รหัสผ่านของผู้ใช้งาน <b>${escapeHtml(username)}</b> ถูกเปลี่ยนเมื่อ <b>${escapeHtml(when)} น.</b></p>
+            <p style="${base}margin:0 0 16px 0;font-size:18px;line-height:22px;">เครื่องอื่นที่เข้าสู่ระบบค้างไว้ถูกออกจากระบบแล้ว</p>
+            <p style="${base}margin:0;color:#b91c1c;font-size:16px;line-height:18px;">${escapeHtml(notice)}</p>
+          </td>
+        </tr>
+      </table>
+    </td>
+  </tr>
+</table>
+</body>
+</html>`;
+  const attachments = hasLogo
+    ? [{ filename: 'lms-logo.png', path: EMAIL_LOGO_PATH, cid: EMAIL_LOGO_CID, contentDisposition: 'inline' }]
+    : [];
+  return { subject, text, html, attachments };
+}
+
+const CHANGE_PASSWORD_MESSAGES = {
+  REQUIRED: 'กรุณากรอกรหัสผ่านปัจจุบัน รหัสผ่านใหม่ และยืนยันรหัสผ่านใหม่ให้ครบ',
+  MISMATCH: 'รหัสผ่านใหม่และยืนยันรหัสผ่านไม่ตรงกัน',
+  SAME_AS_OLD: 'รหัสผ่านใหม่ต้องไม่ซ้ำกับรหัสผ่านปัจจุบัน',
+  WRONG_PASSWORD: 'รหัสผ่านปัจจุบันไม่ถูกต้อง',
+  SUCCESS: 'เปลี่ยนรหัสผ่านเรียบร้อยแล้ว',
+};
+
+// POST /api/users/me/password { current_password, new_password, confirm_password, code }
+// ขั้นตอน: ตรวจรหัสผ่านปัจจุบัน → ยืนยัน MFA → บันทึกรหัสผ่านใหม่ → ส่ง token ใหม่ (เครื่องนี้อยู่ต่อได้) → แจ้งอีเมล
+// เครื่องอื่นหลุดเอง เพราะ token ผูกกับ password_hash (config/auth.js -> passwordVersion)
+async function changeOwnPassword(req, res) {
+  const username = String(req.user?.username || '').trim().toUpperCase();
+  const currentPassword = String(req.body?.current_password || '');
+  const newPassword = String(req.body?.new_password || '');
+  const confirmPassword = String(req.body?.confirm_password ?? '');
+  const code = String(req.body?.code || '').trim();
+
+  if (!username) return res.status(401).json({ success: false, code: 'AUTH_REQUIRED', message: 'กรุณาเข้าสู่ระบบ' });
+  if (!currentPassword || !newPassword || !confirmPassword) {
+    return res.status(400).json({ success: false, code: 'REQUIRED', message: CHANGE_PASSWORD_MESSAGES.REQUIRED });
+  }
+  const ruleError = validateNewPassword(newPassword, { isNew: false });
+  if (ruleError) return res.status(400).json({ success: false, code: 'PASSWORD_RULE', message: ruleError });
+  if (newPassword !== confirmPassword) {
+    return res.status(400).json({ success: false, code: 'PASSWORD_MISMATCH', message: CHANGE_PASSWORD_MESSAGES.MISMATCH });
+  }
+  if (newPassword === currentPassword) {
+    return res.status(400).json({ success: false, code: 'SAME_AS_OLD', message: CHANGE_PASSWORD_MESSAGES.SAME_AS_OLD });
+  }
+  if (!mfaService.CODE_PATTERN.test(code)) {
+    return res.status(400).json({ success: false, code: 'MFA_CODE_REQUIRED', message: MFA_MESSAGES.REQUIRED_CODE });
+  }
+
+  try {
+    await ensureUserTable();
+    const pool = await getPool();
+    const user = await selectLoginUser(pool, username);
+    if (!user || !user.is_active || !user.password_hash) {
+      return res.status(401).json({ success: false, code: 'USER_NOT_FOUND', message: 'ไม่พบบัญชีผู้ใช้งาน กรุณาเข้าสู่ระบบใหม่' });
+    }
+    if (user.is_locked) return sendAccountLocked(res, user);
+
+    // รหัสผ่านปัจจุบัน — ใช้ตัวนับเดียวกับตอน login (ผิดครบกำหนด = ล็อคบัญชี)
+    if (!(await verifyPasswordAsync(currentPassword, user.password_hash))) {
+      const failed = await registerFailedLogin(pool, username);
+      if (failed?.is_locked) return sendAccountLocked(res, failed);
+      return res.status(401).json({ success: false, code: 'WRONG_PASSWORD', message: CHANGE_PASSWORD_MESSAGES.WRONG_PASSWORD });
+    }
+    await clearFailedLogins(pool, username);
+
+    const mfa = await mfaService.checkUserCode(pool, username, code);
+    if (mfa.status === 'NO_SECRET') return res.status(400).json({ success: false, code: 'MFA_NOT_SET', message: MFA_MESSAGES.NOT_SET });
+    if (mfa.status === 'LOCKED') return sendMfaLocked(res, mfa.lock);
+    if (mfa.status !== 'OK') return res.status(401).json({ success: false, code: 'MFA_INVALID', message: MFA_MESSAGES.INVALID_CODE });
+
+    // บันทึก: เปลี่ยนรหัส + ปลดตัวนับ + ยกเลิกลิงก์ตั้งรหัสผ่านที่ค้างอยู่ (ถ้ามี)
+    // ไม่แตะลิงก์ตั้งค่าบัญชี / MFA (ACTIVATE*, MFA_SETUP) — บัญชีที่ยังตั้งค่าไม่เสร็จ login ไม่ได้อยู่แล้ว
+    const passwordHash = await hashPasswordAsync(newPassword);
+    const updated = await pool.request()
+      .input('username', username)
+      .input('old_hash', user.password_hash)
+      .input('password_hash', passwordHash)
+      .query(`
+        UPDATE [${TABLES.USER}]
+        SET password_hash = @password_hash,
+            failed_login_count = 0,
+            lockout_until = NULL,
+            reset_token_hash = CASE WHEN ISNULL(reset_token_purpose, 'PASSWORD') = 'PASSWORD' THEN NULL ELSE reset_token_hash END,
+            reset_token_expires = CASE WHEN ISNULL(reset_token_purpose, 'PASSWORD') = 'PASSWORD' THEN NULL ELSE reset_token_expires END,
+            reset_token_purpose = CASE WHEN ISNULL(reset_token_purpose, 'PASSWORD') = 'PASSWORD' THEN NULL ELSE reset_token_purpose END,
+            updated_at = GETDATE()
+        WHERE UPPER(username) = @username AND password_hash = @old_hash
+      `);
+    // รหัสผ่านถูกเปลี่ยนจากที่อื่นระหว่างนี้ (เช่นตั้งผ่านลิงก์) — ไม่เขียนทับ
+    if (!(updated.rowsAffected || []).some((n) => n > 0)) {
+      return res.status(409).json({ success: false, code: 'PASSWORD_CHANGED_ELSEWHERE', message: 'รหัสผ่านถูกเปลี่ยนจากที่อื่นแล้ว กรุณาเข้าสู่ระบบใหม่' });
+    }
+    clearAuthCache(username);
+
+    const fresh = await selectLoginUser(pool, username);
+    const email = await pool.request().input('username', username)
+      .query(`SELECT email FROM [${TABLES.USER}] WHERE UPPER(username) = @username`)
+      .then((r) => normalizeEmail(r.recordset?.[0]?.email))
+      .catch(() => '');
+    if (email && isMailConfigured()) {
+      const mail = buildPasswordChangedEmail({ username: fresh.username, displayName: fresh.name_th || fresh.name_en });
+      // ไม่รอผลอีเมล — ส่งไม่สำเร็จ รหัสผ่านก็เปลี่ยนแล้ว แค่บันทึก log
+      sendMail({ to: email, ...mail }).catch((mailErr) => {
+        logger.error('Password changed email failed:', mailErr.responseCode || '', mailErr.response || mailErr.message);
+      });
+    }
+
+    const token = signUserToken({
+      username: fresh.username,
+      roleId: fresh.role_id,
+      passwordHash: fresh.password_hash,
+      mfaSecretEnc: fresh.mfa_secret_enc,
+    });
+    return res.json({ success: true, message: CHANGE_PASSWORD_MESSAGES.SUCCESS, token, expiresAt: getTokenExpiry(token), emailSent: Boolean(email && isMailConfigured()) });
+  } catch (err) {
+    logger.error('Change own password error:', err.message);
+    return res.status(500).json({ success: false, message: 'เกิดข้อผิดพลาดในการเปลี่ยนรหัสผ่าน' });
+  }
+}
+
 module.exports = {
   normalizeUserGroup,
   getUsers,
+  getUserDirectory,
   getUserByUsername,
   createUser,
   updateUser,
@@ -1426,6 +1620,8 @@ module.exports = {
   setUserActive,
   resetUserMfa,
   buildResetEmail,
+  buildPasswordChangedEmail,
+  changeOwnPassword,
   hashPassword,
   hashPasswordAsync,
   verifyPasswordAsync,

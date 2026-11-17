@@ -10,6 +10,7 @@ const {
   createRestoreDockDoorHandler,
   getWarehouses,
   getTruckTypes,
+  getLookups,
 } = require('../controllers/masterController');
 const {
   getPermissions,
@@ -20,6 +21,8 @@ const {
 } = require('../controllers/permissionController');
 const {
   getUsers,
+  getUserDirectory,
+  changeOwnPassword,
   getUserByUsername,
   createUser,
   updateUser,
@@ -54,6 +57,7 @@ function createMasterRoutes(io) {
   router.get('/dock-doors', getDockDoors);
   router.get('/warehouses', getWarehouses);
   router.get('/truck-types', getTruckTypes);
+  router.get('/lookups', getLookups);
 
   const canAddDoor = can('canAddDoor', 'canManageDoorLock');
   const canDeleteDoor = can('canDeleteDoor', 'canManageDoorLock');
@@ -89,6 +93,9 @@ function createMasterRoutes(io) {
   router.post('/login/mfa/setup', loginRateLimit, loginMfaSetup);
   router.post('/login/mfa/verify', loginRateLimit, loginMfaVerify);
   router.get('/users', can(...canViewUsers), getUsers);
+  router.get('/users/directory', getUserDirectory); // ต้องอยู่ก่อน /users/:username
+  // ผู้ใช้เปลี่ยนรหัสผ่านเอง (ต้อง login + รหัสผ่านปัจจุบัน + MFA) — รหัสผิดตอบ 401 จึงนับเข้า limit ต่อ IP ของ loginRateLimit
+  router.post('/users/me/password', loginRateLimit, audit(USER.changeOwnPassword), changeOwnPassword);
   router.get('/users/:username', requireSelfOrPermission(...canViewUsers), getUserByUsername);
   router.post('/password-reset/verify', passwordResetRateLimit, verifyPasswordResetToken);
   router.post('/password-reset/confirm', passwordResetRateLimit, confirmPasswordReset);
