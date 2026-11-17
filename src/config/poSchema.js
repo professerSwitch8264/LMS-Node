@@ -193,8 +193,17 @@ async function migrateReceived(pool) {
   }
 }
 
+// index ที่ใช้เรียง (วันที่สร้าง) และกรอง (สถานะ) บ่อย — เพิ่มให้ตารางที่สร้างไว้แล้วด้วย
+const INDEX_SQL = `
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'IX_${P}_create_date' AND object_id = OBJECT_ID('${P}'))
+  CREATE INDEX IX_${P}_create_date ON ${P} (create_date);
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'IX_${P}_po_status' AND object_id = OBJECT_ID('${P}'))
+  CREATE INDEX IX_${P}_po_status ON ${P} (po_status) INCLUDE (PO_No);
+`;
+
 async function ensurePoTables(pool) {
   await pool.request().query(CREATE_TABLES_SQL);
+  await pool.request().query(INDEX_SQL);
   // ระบบเก่าตั้งชื่อตาราง Received_Master — เปลี่ยนชื่อก่อนย้าย
   await pool.request().query(`
     IF OBJECT_ID('${R}', 'U') IS NULL AND OBJECT_ID('Received_Master', 'U') IS NOT NULL

@@ -1,5 +1,6 @@
 const { logger } = require('../utils/logger');
 const { parseTableQuery, queryPoTable } = require('../services/poTableService');
+const { hasAnyPermission } = require('../services/permissionService');
 const { sql, getPool } = require('../config/db');
 const { TABLES } = require('../config/constants');
 const { formatSqlDateTimeStr, formatLocalIso } = require('../utils/dateHelper');
@@ -281,6 +282,19 @@ async function loadPoRounds(pool, poIds) {
   return result.recordset.map(mapPoRow);
 }
 
+// เบอร์คนขับเห็นเต็มเฉพาะคนที่ดู/แก้แผนรถเข้าได้ — คนอื่นเห็นแค่ 2 ตัวท้าย
+// (ไม่ส่งค่าว่าง เพราะหน้าเว็บใช้ "มีเบอร์" เป็นเงื่อนไขหนึ่งของ "ลงแผนรถแล้ว")
+const MASK_CHAR = '•';
+const canSeeDriverContact = (req) => hasAnyPermission(req.user?.effective, ['canViewCarPlan', 'canEditCarPlan']);
+const maskTel = (tel) => {
+  const t = String(tel || '');
+  if (!t) return t;
+  const digits = t.replace(/\D/g, '').length;
+  let seen = 0;
+  return t.replace(/\d/g, (d) => (++seen > digits - 2 ? d : MASK_CHAR));
+};
+const redactPos = (req, list) => (canSeeDriverContact(req) ? list : list.map((p) => ({ ...p, driverTel: maskTel(p.driverTel) })));
+
 // GET /api/pos/table — ตาราง PO: ค้นหา / กรอง / เรียง / แบ่งหน้าที่ server (ดู services/poTableService.js)
 async function getPoTable(req, res) {
   try {
@@ -292,7 +306,7 @@ async function getPoTable(req, res) {
       permissions: { ...(effective.perms || {}), isAdminSystem: Boolean(effective.isAdminSystem) },
     };
     const result = queryPoTable(pos, parseTableQuery(req.query), viewer);
-    res.json({ success: true, data: result.rows, total: result.total, page: result.page, pageSize: result.pageSize, totalPages: result.totalPages, options: result.options });
+    res.json({ success: true, data: redactPos(req, result.rows), total: result.total, page: result.page, pageSize: result.pageSize, totalPages: result.totalPages, options: result.options });
   } catch (err) {
     logger.error('Error in /api/pos/table:', err.message);
     res.status(500).json({ success: false, error: err.message });
@@ -303,7 +317,7 @@ async function getPos(req, res) {
   try {
     const pool = await getPool();
     const pos = await loadAllPos(pool);
-    res.json({ success: true, data: pos });
+    res.json({ success: true, data: redactPos(req, pos) });
   } catch (err) {
     logger.error('Error in /api/pos:', err.message);
     res.status(500).json({ success: false, error: err.message });
@@ -320,7 +334,7 @@ async function getPoRounds(req, res) {
   try {
     const pool = await getPool();
     const rows = await loadPoRounds(pool, poIds);
-    res.json({ success: true, data: rows });
+    res.json({ success: true, data: redactPos(req, rows) });
   } catch (err) {
     logger.error('Error in /api/pos/rounds:', err.message);
     res.status(500).json({ success: false, error: err.message });
@@ -429,16 +443,12 @@ function createRegisterCarHandler(io) {
       const newRequest = () => pool.request();
       const resolvedTruck = await resolveTruckFromDb(pool, truckTypeId, truckType);
 
-      let po = await findPo(newRequest, { poId: receivedId || id, poNo, includeCancelled: Boolean(receivedId || id) });
+      // ลงแผนรถได้เฉพาะ PO ที่มีอยู่แล้วและยังไม่ยกเลิก (ไม่สร้าง PO ใหม่จากหน้านี้ — PO ต้องสร้างจากข้อมูลออฟฟิศ)
+      let po = await findPo(newRequest, { poId: receivedId || id, poNo });
       if (!po && (receivedId || id)) po = await findPo(newRequest, { poNo });
-      if (!po) {
-        // ระบบเดิม: ลงแผนรถให้ PO ที่ยังไม่มีในระบบได้ → สร้าง PO ใหม่พร้อมรอบที่ 1
-        const created = await newRequest()
-          .input('poNo', sql.NVarChar(50), String(poNo).trim())
-          .input('by', sql.NVarChar(100), req.user?.username || null)
-          .query(`INSERT INTO ${PO_T} (PO_No, create_by, update_by) OUTPUT INSERTED.po_id VALUES (@poNo, @by, @by)`);
-        po = await findPo(newRequest, { poId: created.recordset[0].po_id, includeCancelled: true });
-      }
+      if (!po) return poNotFound(res, NOT_FOUND_OR_CANCELLED(poNo));
+      const blocked = STEP_RULES.carPlan(po);
+      if (blocked) return sendStepError(res, blocked, poNo);
 
       // รอบที่เกิดจากการเลื่อนแผน: วัน-เวลากำหนดไว้แล้วตอนเลื่อน ไม่รับค่าจากหน้าเว็บ
       const keepPlan = Boolean(po.rescheduled_from_id && po.register_date);
@@ -450,7 +460,7 @@ function createRegisterCarHandler(io) {
       }
       const regDateTimeStr = keepPlan ? null : formatSqlDateTimeStr(registerDate, registerTime);
 
-      await newRequest()
+      const saved = await newRequest()
         .input('txId', sql.Int, po.po_transaction_id)
         .input('truckTypeId', sql.Int, safeInt(resolvedTruck.truckTypeId))
         .input('truckType', sql.NVarChar(100), resolvedTruck.truckType)
@@ -469,8 +479,9 @@ function createRegisterCarHandler(io) {
             register_date = CASE WHEN @regDateStr IS NOT NULL THEN CONVERT(datetime, @regDateStr, 120) ELSE register_date END,
             process_stage = 'WAIT_DOCK',
             update_date = GETDATE()
-          WHERE po_transaction_id = @txId
+          WHERE po_transaction_id = @txId AND is_current = 1 AND tx_status = 'ACTIVE'
         `);
+      if (lastAffected(saved) === 0) return sendStepError(res, 'STALE', poNo);
       await touchPo(newRequest, po.po_id, req.user?.username);
 
       logger.debug(`[API POST /api/register-car] บันทึกสำเร็จ PO: ${poNo} รอบ ${po.round_no}, truck_type: ${resolvedTruck.truckType}, date: ${regDateTimeStr || po.register_str}`);
@@ -487,14 +498,44 @@ function createRegisterCarHandler(io) {
   };
 }
 
-// อัปเดตรอบปัจจุบันของ PO (ที่ยังไม่ยกเลิก) — คืน PO ที่เจอ หรือ null
-async function updateCurrentTx(pool, { poId = null, poNo, loose = false }, setSql, bindInputs = (r) => r) {
+// ---------- ลำดับขั้นของรอบ (ตรวจที่ server — ไม่พึ่งหน้าเว็บอย่างเดียว) ----------
+const STEP_ERRORS = {
+  NOT_FOUND: { status: 404, message: 'ไม่พบ PO หรือรายการถูกยกเลิกแล้ว' },
+  STALE: { status: 409, message: 'PO นี้ถูกเลื่อนแผนหรือเปลี่ยนแปลงระหว่างบันทึก กรุณาโหลดข้อมูลใหม่' },
+  COMPLETED: { status: 409, message: 'รายการเสร็จสิ้นแล้ว ไม่สามารถบันทึกขั้นนี้ได้' },
+  NOT_REGISTERED: { status: 409, message: 'ยังไม่ได้ลงแผนรถเข้า' },
+  NOT_ARRIVED: { status: 409, message: 'รถยังไม่เข้าโรงงาน' },
+  ALREADY_ARRIVED: { status: 409, message: 'บันทึกรถเข้าไปแล้ว' },
+};
+const isTxCompleted = (po) => Boolean(po.truck_departure || po.tx_status === 'COMPLETED' || po.po_status === 'COMPLETED');
+const STEP_RULES = {
+  // ลงแผนรถ / แก้แผนรถ: ก่อนรถเข้าเท่านั้น
+  carPlan: (po) => (isTxCompleted(po) ? 'COMPLETED' : (po.truck_arrival ? 'ALREADY_ARRIVED' : null)),
+  arrival: (po) => (isTxCompleted(po) ? 'COMPLETED' : !isCarPlanFilled(po) ? 'NOT_REGISTERED' : (po.truck_arrival ? 'ALREADY_ARRIVED' : null)),
+  dock: (po) => (isTxCompleted(po) ? 'COMPLETED' : (!isCarPlanFilled(po) ? 'NOT_REGISTERED' : null)),
+  ticket: (po) => (isTxCompleted(po) ? 'COMPLETED' : (!po.truck_arrival ? 'NOT_ARRIVED' : null)),
+  lcTicket: (po) => (isTxCompleted(po) ? 'COMPLETED' : null),
+  // หยิบ / โหลด / รถออก: ต้องมีรถเข้าแล้ว
+  warehouse: (po) => (isTxCompleted(po) ? 'COMPLETED' : (!po.truck_arrival ? 'NOT_ARRIVED' : null)),
+};
+const sendStepError = (res, code, poNo) => {
+  const e = STEP_ERRORS[code] || STEP_ERRORS.NOT_FOUND;
+  const error = code === 'NOT_FOUND' ? NOT_FOUND_OR_CANCELLED(poNo) : `PO ${poNo}: ${e.message}`;
+  return res.status(e.status).json({ success: false, code: code === 'NOT_FOUND' ? 'PO_NOT_FOUND' : code, error });
+};
+
+// อัปเดตรอบปัจจุบันของ PO (ที่ยังไม่ยกเลิก) — คืน { po } หรือ { error: code }
+// UPDATE มีเงื่อนไข is_current = 1 ด้วย: ถ้ารอบถูกเลื่อนระหว่างนี้ จะไม่ไปเขียนทับรอบเก่า (ตอบ STALE)
+async function updateCurrentTx(pool, { poId = null, poNo, loose = false }, setSql, bindInputs = (r) => r, rule = null) {
   const newRequest = () => pool.request();
   const po = await findPo(newRequest, { poId, poNo, loose });
-  if (!po) return null;
-  await bindInputs(newRequest().input('txId', sql.Int, po.po_transaction_id))
-    .query(`UPDATE ${TX_T} SET ${setSql}, update_date = GETDATE() WHERE po_transaction_id = @txId`);
-  return po;
+  if (!po) return { error: 'NOT_FOUND' };
+  const blocked = rule ? rule(po) : null;
+  if (blocked) return { error: blocked, po };
+  const r = await bindInputs(newRequest().input('txId', sql.Int, po.po_transaction_id))
+    .query(`UPDATE ${TX_T} SET ${setSql}, update_date = GETDATE() WHERE po_transaction_id = @txId AND is_current = 1 AND tx_status = 'ACTIVE'`);
+  if (lastAffected(r) === 0) return { error: 'STALE', po };
+  return { po };
 }
 
 function createTruckArrivalHandler(io) {
@@ -502,8 +543,8 @@ function createTruckArrivalHandler(io) {
     const { poNo } = req.body;
     try {
       const pool = await getPool();
-      const po = await updateCurrentTx(pool, { poNo }, "truck_arrival = GETDATE(), process_stage = 'WAIT_TICKET'");
-      if (!po) return poNotFound(res, NOT_FOUND_OR_CANCELLED(poNo));
+      const { error } = await updateCurrentTx(pool, { poNo }, "truck_arrival = GETDATE(), process_stage = 'WAIT_TICKET'", undefined, STEP_RULES.arrival);
+      if (error) return sendStepError(res, error, poNo);
 
       logger.debug(`[API POST /api/truck-arrival] บันทึกสำเร็จ PO: ${poNo}`);
 
@@ -520,19 +561,22 @@ function createTruckArrivalHandler(io) {
 }
 
 // รถออก: ปิดรอบ (COMPLETED) + PO เสร็จ + ปลดประตูของรอบนี้
+// คืน false ถ้ารอบนี้ไม่ใช่รอบปัจจุบันแล้ว (ถูกเลื่อนระหว่างนี้)
 async function completeCurrentTx(pool, po) {
   const newRequest = () => pool.request();
-  await newRequest()
+  const r = await newRequest()
     .input('txId', sql.Int, po.po_transaction_id)
     .query(`
       UPDATE ${TX_T}
       SET truck_departure = COALESCE(truck_departure, GETDATE()), process_stage = 'COMPLETED', tx_status = 'COMPLETED', update_date = GETDATE()
-      WHERE po_transaction_id = @txId
+      WHERE po_transaction_id = @txId AND is_current = 1 AND tx_status = 'ACTIVE'
     `);
+  if (lastAffected(r) === 0) return false;
   await newRequest()
     .input('poId', sql.Int, po.po_id)
     .query(`UPDATE ${PO_T} SET po_status = 'COMPLETED', update_date = GETDATE() WHERE po_id = @poId AND po_status <> 'CANCELLED'`);
   await releaseDockOfTx(newRequest, po.po_transaction_id);
+  return true;
 }
 
 function createTruckDepartureHandler(io) {
@@ -542,7 +586,9 @@ function createTruckDepartureHandler(io) {
       const pool = await getPool();
       const po = await findPo(() => pool.request(), { poNo, loose: true });
       if (!po) return poNotFound(res, NOT_FOUND_OR_CANCELLED(poNo));
-      await completeCurrentTx(pool, po);
+      const blocked = STEP_RULES.warehouse(po);
+      if (blocked) return sendStepError(res, blocked, poNo);
+      if (!(await completeCurrentTx(pool, po))) return sendStepError(res, 'STALE', poNo);
 
       const effectiveUser = req.user?.username
         || ((username && String(username).trim()) ? String(username).trim().toUpperCase() : 'SYSTEM');
@@ -907,14 +953,13 @@ async function upsertOfficePo(newRequest, body, username = null) {
         IF NOT EXISTS (SELECT 1 FROM ${TX_T} WHERE po_id = @receivedId AND is_current = 1)
           INSERT INTO ${TX_T} (po_id, round_no, is_current, tx_status, process_stage) VALUES (@receivedId, 1, 1, 'ACTIVE', @stage);
 
+        -- แก้ข้อมูลออฟฟิศ: ไม่แตะประตูโหลด (จองผ่าน assign-dock) และเปลี่ยนขั้นเฉพาะรอบที่ยังไม่ได้ลงแผนรถ
         UPDATE ${TX_T}
         SET
-          dock_door_id = @dockDoorId,
-          dock_door_code = @dockDoorCode,
-          dock_door_name = @dockDoorName,
           process_stage = @stage,
           update_date = GETDATE()
-        WHERE po_id = @receivedId AND is_current = 1;
+        WHERE po_id = @receivedId AND is_current = 1
+          AND ISNULL(process_stage, 'WAIT_PO_DATA') IN ('WAIT_PO_DATA', 'WAIT_CAR_PLAN');
 
         SELECT @receivedId AS final_received_id, 0 AS is_created;
       END
@@ -1014,7 +1059,7 @@ const IMPORT_REQUIRED = [
   ['quantity', (it) => Number(it.quantityOrder) > 0, 'จำนวน (มากกว่า 0)'],
   ['uom', (it) => Boolean(String(it.quantityUom || '').trim()), 'หน่วย (UOM)'],
   ['warehouse', (it) => Boolean(String(it.warehouseName || it.warehouseCode || '').trim()), 'คลังสินค้า'],
-  ['shipTo', (it) => Boolean(String(it.shipToName || it.toLocation || '').trim()), 'สถานที่ส่ง'],
+  ['shipTo', (it) => Boolean(String(it.shipToName || it.toLocation || '').trim()), 'สถานที่จัดส่ง'],
 ];
 
 // หมายเลข PO: ตัวเลขล้วน 10 หลัก (กฎเดียวกับหน้าเว็บ: isValidPoNo ใน src/domain/po.js)
@@ -1144,7 +1189,7 @@ function createAssignDockHandler(io) {
         }
       }
 
-      const po = await updateCurrentTx(
+      const { error } = await updateCurrentTx(
         pool,
         { poNo },
         `dock_door_id = @dockDoorId, dock_door_code = @dockDoorCode, dock_door_name = @dockDoorName, process_stage = 'WAIT_DOCK'`,
@@ -1152,8 +1197,9 @@ function createAssignDockHandler(io) {
           .input('dockDoorId', sql.Int, finalDoorId)
           .input('dockDoorCode', sql.NVarChar(50), finalDoorCode)
           .input('dockDoorName', sql.NVarChar(100), finalDoorName),
+        STEP_RULES.dock,
       );
-      if (!po) return poNotFound(res, NOT_FOUND_OR_CANCELLED(poNo));
+      if (error) return sendStepError(res, error, poNo);
 
       logger.debug(`[API POST /api/assign-dock] บันทึกประตูสำเร็จ PO: ${poNo}, Door: ${finalDoorCode} (id: ${finalDoorId})`);
 
@@ -1175,8 +1221,8 @@ function createIssueTicketHandler(io) {
     const { poNo } = req.body;
     try {
       const pool = await getPool();
-      const po = await updateCurrentTx(pool, { poNo }, `ticket_date = GETDATE(), process_stage = 'WAIT_LOADING'`);
-      if (!po) return poNotFound(res, NOT_FOUND_OR_CANCELLED(poNo));
+      const { error } = await updateCurrentTx(pool, { poNo }, `ticket_date = GETDATE(), process_stage = 'WAIT_LOADING'`, undefined, STEP_RULES.ticket);
+      if (error) return sendStepError(res, error, poNo);
 
       logger.debug(`[API POST /api/issue-ticket] ออกตั๋วสำเร็จ PO: ${poNo}`);
 
@@ -1206,8 +1252,8 @@ function createSendLcTicketHandler(io) {
       let sentCount = 0;
       const notFound = [];
       for (const p of list) {
-        const po = await updateCurrentTx(pool, { poNo: p }, 'order_date = COALESCE(order_date, GETDATE())');
-        if (po) sentCount += 1; else notFound.push(p);
+        const { error } = await updateCurrentTx(pool, { poNo: p }, 'order_date = COALESCE(order_date, GETDATE())', undefined, STEP_RULES.lcTicket);
+        if (!error) sentCount += 1; else notFound.push(p);
       }
 
       if (sentCount === 0) {
@@ -1269,29 +1315,32 @@ function createOutsideTaskHandler(io) {
       const txReq = newRequest().input('txId', sql.Int, po.po_transaction_id);
       const poSets = ['update_date = GETDATE()'];
       const txSets = ['update_date = GETDATE()'];
+      const canEditOffice = hasAnyPermission(req.user?.effective, ['canEditPoData']);
+      const canEditCar = hasAnyPermission(req.user?.effective, ['canEditCarPlan']);
+      const canEditDock = hasAnyPermission(req.user?.effective, ['canEditDockDoor']);
 
-      if (customerCode && customerCode !== '-') {
+      if (canEditOffice && customerCode && customerCode !== '-') {
         poReq.input('customerCode', sql.NVarChar(50), String(customerCode));
         poSets.push('customer_code = @customerCode');
       }
-      if (customerName && customerName !== '-') {
+      if (canEditOffice && customerName && customerName !== '-') {
         poReq.input('customerName', sql.NVarChar(255), String(customerName));
         poSets.push('customer_Name = @customerName');
       }
-      if (warehouseCode && warehouseCode !== '-') {
+      if (canEditOffice && warehouseCode && warehouseCode !== '-') {
         poReq.input('warehouseCode', sql.NVarChar(50), String(warehouseCode));
         poSets.push('warehouse_code = @warehouseCode');
       }
-      if (warehouseName && warehouseName !== '-') {
+      if (canEditOffice && warehouseName && warehouseName !== '-') {
         poReq.input('warehouseName', sql.NVarChar(255), String(warehouseName));
         poSets.push('warehouse_name = @warehouseName');
       }
       const effectiveShipToName = shipToName || toLocation;
-      if (effectiveShipToName && effectiveShipToName !== '-') {
+      if (canEditOffice && effectiveShipToName && effectiveShipToName !== '-') {
         poReq.input('shipToName', sql.NVarChar(255), String(effectiveShipToName));
         poSets.push('ship_to_name = @shipToName');
       }
-      if (quantityOrder && quantityOrder !== '-') {
+      if (canEditOffice && quantityOrder && quantityOrder !== '-') {
         const cleanQtyStr = String(quantityOrder).replace(/[^0-9.]/g, '');
         const qtyVal = cleanQtyStr ? parseFloat(cleanQtyStr) : null;
         if (qtyVal !== null) {
@@ -1299,12 +1348,12 @@ function createOutsideTaskHandler(io) {
           poSets.push('quantity = @quantity');
         }
       }
-      if (quantityUom && quantityUom !== '-') {
+      if (canEditOffice && quantityUom && quantityUom !== '-' && await isKnownUom(pool, normalizeUom(quantityUom))) {
         poReq.input('quantityUom', sql.NVarChar(20), normalizeUom(quantityUom));
         poSets.push('quantity_uom = @quantityUom');
       }
 
-      const resolvedTruck = await resolveTruckFromDb(pool, truckTypeId, truckType);
+      const resolvedTruck = canEditCar ? await resolveTruckFromDb(pool, truckTypeId, truckType) : { truckTypeId: null, truckType: '' };
       if (resolvedTruck.truckTypeId !== null) {
         txReq.input('truckTypeId', sql.Int, safeInt(resolvedTruck.truckTypeId));
         txSets.push('truck_type_id = @truckTypeId');
@@ -1313,20 +1362,20 @@ function createOutsideTaskHandler(io) {
         txReq.input('truckType', sql.NVarChar(100), resolvedTruck.truckType);
         txSets.push('truck_type = @truckType');
       }
-      if (licensePlate && licensePlate !== '-') {
+      if (canEditCar && licensePlate && licensePlate !== '-') {
         txReq.input('license', sql.NVarChar(50), String(licensePlate));
         txSets.push('license = @license');
       }
-      if (driverName && driverName !== '-') {
+      if (canEditCar && driverName && driverName !== '-') {
         txReq.input('driverName', sql.NVarChar(100), String(driverName));
         txSets.push('driver_name = @driverName');
       }
-      if (driverTel && driverTel !== '-') {
+      if (canEditCar && driverTel && driverTel !== '-' && !String(driverTel).includes(MASK_CHAR)) {
         txReq.input('driverTel', sql.NVarChar(20), String(driverTel).trim());
         txSets.push('driver_tel = @driverTel');
       }
       // รอบที่เกิดจากการเลื่อนแผน: แผนรถเข้ากำหนดไว้แล้ว ไม่เขียนทับ
-      if (registerDate && registerDate !== '-' && !(po.rescheduled_from_id && po.register_date)) {
+      if (canEditCar && registerDate && registerDate !== '-' && !(po.rescheduled_from_id && po.register_date)) {
         const regDateTimeStr = formatSqlDateTimeStr(registerDate, registerTime);
         if (regDateTimeStr) {
           txReq.input('regDateStr', sql.VarChar(30), regDateTimeStr);
@@ -1336,15 +1385,15 @@ function createOutsideTaskHandler(io) {
 
       const effectiveDockDoor = dockDoorCode || dockDoor;
       const safeDoorId = safeInt(dockDoorId);
-      if (safeDoorId) {
+      if (canEditDock && safeDoorId) {
         txReq.input('dockDoorId', sql.Int, safeDoorId);
         txSets.push('dock_door_id = @dockDoorId');
       }
-      if (effectiveDockDoor && effectiveDockDoor !== '-') {
+      if (canEditDock && effectiveDockDoor && effectiveDockDoor !== '-') {
         txReq.input('dockDoorCode', sql.NVarChar(50), String(effectiveDockDoor));
         txSets.push('dock_door_code = @dockDoorCode');
       }
-      if (dockDoorName && dockDoorName !== '-') {
+      if (canEditDock && dockDoorName && dockDoorName !== '-') {
         txReq.input('dockDoorName', sql.NVarChar(100), String(dockDoorName));
         txSets.push('dock_door_name = @dockDoorName');
       }
@@ -1366,10 +1415,18 @@ function createOutsideTaskHandler(io) {
         if (!effectiveTruckDeparture) txSets.push("process_stage = 'WAIT_DEPARTURE'");
       }
 
+      // หยิบ / โหลด / รถออก ต้องมีรถเข้าแล้ว และรายการยังไม่เสร็จ
+      if (pStart || pFinish || lStart || lFinish || departing) {
+        const blocked = STEP_RULES.warehouse(po);
+        if (blocked) return sendStepError(res, blocked, poNo);
+      }
+      if (txSets.length > 1) {
+        const r = await txReq.query(`UPDATE ${TX_T} SET ${txSets.join(', ')} WHERE po_transaction_id = @txId AND is_current = 1 AND tx_status = 'ACTIVE'`);
+        if (lastAffected(r) === 0) return sendStepError(res, 'STALE', poNo);
+      }
       if (poSets.length > 1) await poReq.query(`UPDATE ${PO_T} SET ${poSets.join(', ')} WHERE po_id = @poId`);
-      if (txSets.length > 1) await txReq.query(`UPDATE ${TX_T} SET ${txSets.join(', ')} WHERE po_transaction_id = @txId`);
       if (departing) {
-        await completeCurrentTx(pool, po);
+        if (!(await completeCurrentTx(pool, po))) return sendStepError(res, 'STALE', poNo);
         logger.debug(`[API POST /api/outside-task] ปลดล็อคประตูโหลดสำหรับ PO ${poNo} กลับเป็น 0 (ว่าง) เรียบร้อย`);
       }
 
@@ -1453,4 +1510,6 @@ module.exports = {
   createSendLcTicketHandler,
   createOutsideTaskHandler,
   createSetUrgentPoHandler,
+  // ใช้ใน test เท่านั้น
+  __test: { updateCurrentTx, completeCurrentTx, findPo, maskTel },
 };

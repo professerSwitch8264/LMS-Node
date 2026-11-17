@@ -142,14 +142,33 @@ async function getLiveDashboardData() {
   }
 }
 
-async function broadcastDashboardUpdate(io) {
-  if (!io) return;
+// บันทึกติด ๆ กันหลายครั้ง → คำนวณ dashboard รอบเดียวหลังเงียบไป 1.5 วินาที (ไม่เกิน 5 วินาทีนับจากครั้งแรก)
+// ไม่ต้องรัน query สรุปทั้งตารางและส่งให้ทุกคนทุกครั้งที่มีการบันทึก
+const DASHBOARD_DEBOUNCE_MS = 1500;
+const DASHBOARD_MAX_WAIT_MS = 5000;
+let dashboardTimer = null;
+let dashboardFirstAt = 0;
+
+async function emitDashboard(io) {
   try {
     const liveData = await getLiveDashboardData();
     io.emit('data', liveData);
   } catch (e) {
     logger.warn('Cannot broadcast dashboard update:', e.message);
   }
+}
+
+function broadcastDashboardUpdate(io) {
+  if (!io) return;
+  const now = Date.now();
+  if (!dashboardTimer) dashboardFirstAt = now;
+  clearTimeout(dashboardTimer);
+  const wait = Math.max(0, Math.min(DASHBOARD_DEBOUNCE_MS, dashboardFirstAt + DASHBOARD_MAX_WAIT_MS - now));
+  dashboardTimer = setTimeout(() => {
+    dashboardTimer = null;
+    emitDashboard(io);
+  }, wait);
+  if (typeof dashboardTimer.unref === 'function') dashboardTimer.unref();
 }
 
 module.exports = {
